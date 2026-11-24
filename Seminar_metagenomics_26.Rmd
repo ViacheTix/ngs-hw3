@@ -1,0 +1,254 @@
+
+
+# Dada2
+```{r}
+# 1. Install BiocManager if you do not have it yet
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# 2. Install the dada2 package
+BiocManager::install("dada2")
+
+# 3. Load the library into your R session
+library("dada2")
+```
+
+
+```{r}
+library("dada2")
+```
+
+
+```{r}
+path <- "../Files/"
+list.files(path)
+```
+
+
+
+```{r}
+fnFs <- sort(list.files(path, pattern = ".R1.fastq", full.names=T))
+fnRs <- sort(list.files(path, pattern = ".R2.fastq", full.names=T))
+
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+```
+
+
+```{r}
+plotQualityProfile(fnFs[1:4])
+plotQualityProfile(fnRs[1:4])
+```
+
+
+```{r}
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen = c(132, 130), truncQ = 2, rm.phix = T,
+                     maxN = 0, maxEE = c(0.5,0.5), compress = T, multithread = T)
+```
+
+```{r}
+head(out)
+```
+```{r}
+plotQualityProfile(filtFs[1:10])
+plotQualityProfile(filtRs[1:10])
+```
+
+```{r}
+errF <- learnErrors(filtFs, multithread = T)
+errR <- learnErrors(filtRs, multithread = T)
+
+plotErrors(errF, nominalQ = T)
+plotErrors(errR, nominalQ = T)
+
+```
+
+
+```{r}
+dadaFs <- dada(filtFs, errF, multithread = T)
+dadaRs <- dada(filtRs, errR, multithread = T)
+```
+
+
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=T, minOverlap = 9)
+?mergePairs
+```
+
+
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+table(nchar(getSequences(seqtab)))
+```
+
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=T, verbose=T)
+?removeBimeraDenovo
+```
+
+```{r}
+dim(seqtab.nochim)
+table(nchar(getSequences(seqtab.nochim)))
+```
+
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+
+
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "../Database/silva_nr99_v138.1_train_set.fa.gz", multithread = T)
+taxa.print <- taxa
+rownames(taxa.print) <- NULL 
+taxa.print <- data.frame(taxa.print)
+```
+
+# Phyloseq
+
+```{r}
+library("phyloseq")
+```
+```{r}
+otu <- data.frame(seqtab.nochim)
+colnames(otu) <- paste0("sp",1:ncol(otu))
+otu_tab <- otu_table(otu, taxa_are_rows = F)
+```
+
+```{r}
+tax <- data.frame(taxa)
+rownames(tax) <- paste0("sp",1:nrow(tax))
+tax_tab <- tax_table(tax)
+```
+
+```{r}
+sam_dat <- read.csv("metadata_seminar01.csv")
+rownames(sam_dat) <- sam_dat$bee_file
+sam_da <- sample_data(sam_dat)
+```
+
+```{r}
+phy_bee <- phyloseq(tax_tab,otu_tab,sam_da)
+```
+
+
+```{r}
+saveRDS(phy_bee, "phy_bee.RDS")
+phy_sem2 <- readRDS("phy_bee.RDS")
+```
+
+
+
+# Preliminary analysis
+
+```{r}
+install.packages("pheatmap")
+
+library(microbiome)
+library(pheatmap)
+```
+
+```{r}
+colnames(phy_sem2@tax_table)
+head(phy_sem2@tax_table)
+kingdom <- tax_glom(phy_bee, "ta1")
+phylum <- tax_glom(phy_bee, "ta2")
+genus <- tax_glom(phy_bee, "ta6")
+```
+
+```{r}
+taxa1 <- core_members(genus, detection=10,prevalence = 0.05)
+fin.phy <- prune_taxa(taxa1,genus)
+```
+
+
+```{r}
+dat <- data.frame(fin.phy@otu_table)
+colnames(dat) <- fin.phy@tax_table[,6]
+```
+
+
+```{r}
+install.packages('reshape')
+library(reshape)
+library(ggplot2)
+
+dat$names <- rownames(dat)
+long_dat <- reshape::melt(dat)
+```
+
+```{r}
+plot <- long_dat %>%
+  ggplot(aes(x=value, y=names)) +
+  geom_bar(aes(fill=variable), stat="identity", position="fill")
+```
+
+```{r}
+pheatmap(data.frame(t(select(dat,-names))),
+         border_color = F,
+         cluster_rows = F, cluster_cols = F)
+```
+
+```{r}
+genus_clr <- microbiome::transform(fin.phy, "clr")
+genus_clr_dataframe <- data.frame(genus_clr@otu_table)
+genus_clr_dataframe <- data.frame(t(genus_clr_dataframe))
+rownames(genus_clr_dataframe) <- genus_clr@tax_table[,6]
+
+pheatmap(genus_clr_dataframe,
+         border_color = F,
+         cluster_rows = F, cluster_cols = F)
+```
+
+
+```{r}
+install.packages("vegan")
+library(vegan)
+```
+
+```{r}
+simp <- vegan::diversity(genus@otu_table, index="simpson")
+shan <- vegan::diversity(genus@otu_table, index = "shannon")
+obs <- rowSums(genus@otu_table!=0)
+alph <- data.frame(simp, shan, obs, genus@sam_data)
+alpha_long <- reshape::melt(alph)
+```
+
+
+```{r}
+ggplot(alpha_long, aes(x=Place.whole, y=value, fill=Place.whole)) +
+  geom_boxplot(outlier.shape = NA, alpha=0.5) +
+  facet_wrap(. ~ variable, scales="free", ncol=1, strip.position="right")
+```
+
+```{r}
+simp <- vegan::diversity(fin.phy@otu_table, index="simpson")
+shan <- vegan::diversity(fin.phy@otu_table, index = "shannon")
+obs <- rowSums(fin.phy@otu_table!=0)
+alph <- data.frame(simp, shan, obs, fin.phy@sam_data)
+alpha_long <- reshape::melt(alph)
+
+ggplot(alpha_long, aes(x=Place.whole, y=value, fill=Place.whole)) +
+  geom_boxplot(outlier.shape = NA, alpha=0.5) +
+  facet_wrap(. ~ variable, scales="free", ncol=1, strip.position="right")
+```
+
+
+
+
+
+
+
